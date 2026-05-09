@@ -21,7 +21,7 @@ jobs:
       run: |
         sudo apt update
         # 去掉 python、python-pip；加上 aria2 保证存在
-        sudo apt -y install python3 python3-pip cpio wget aria2
+        sudo apt -y install python3 python3-pip cpio wget aria2 lib32stdc++6 lib32z1 libc6-i386 gzip xz-utils lz4
         # 使用 --break-system-packages 绕过 Python 外部管理限制
         pip3 install --break-system-packages twrpdtgen
         mkdir dt
