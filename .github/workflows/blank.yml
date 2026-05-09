@@ -10,58 +10,42 @@ on:
 
 jobs:
   build:
-    if: github.event.repository.owner.id == github.event.sender.id
-    runs-on: ubuntu-24.04
+  if: github.event.repository.owner.id == github.event.sender.id
+  runs-on: ubuntu-24.04
 
-    steps:
-    - name: Check Out
-      uses: actions/checkout@main
+  steps:
+  - name: Check Out
+    uses: actions/checkout@main
 
-    - name: Prepare the environment
-      run: |
-        sudo apt update
-        sudo apt -y install python3 python3-pip cpio wget aria2 \
-          lib32stdc++6 lib32z1 libc6-i386 gzip xz-utils lz4
-        pip3 install --break-system-packages twrpdtgen
-        mkdir -p dt
+  - name: Prepare the environment
+    run: |
+      sudo apt update
+      sudo apt -y install python3 python3-pip cpio wget aria2 \
+        lib32stdc++6 lib32z1 libc6-i386 gzip xz-utils lz4
+      pip3 install --break-system-packages twrpdtgen
+      mkdir -p dt
 
-    - name: Download boot or recovery img
-      run: |
-        aria2c "${{ github.event.inputs.IMG_URL }}"
-        ls -lh *.img
+  - name: Download boot or recovery img
+    run: |
+      aria2c "${{ github.event.inputs.IMG_URL }}"
+      ls -lh *.img
 
-    # 关键是设置可执行的临时目录，并手动测试 AIK
-    - name: Debug AIK and fix noexec /tmp
-      run: |
-        # 创建我们自己的临时目录（/home/runner 是可执行的）
-        mkdir -p ~/tmp
-        export TMPDIR=~/tmp
+  - name: Start build (fix tmp noexec)
+    run: |
+      mkdir -p ~/tmp
+      export TMPDIR=~/tmp
+      python3 -m twrpdtgen -o dt/ *.img
 
-        # 下载 AIK 到工作区测试解包
-        git clone --depth=1 https://github.com/osm0sis/Android-Image-Kitchen /tmp/aik
-        cp *.img /tmp/aik/
-        cd /tmp/aik
-        # 同样指定 TMPDIR，让 AIK 使用我们创建的目录
-        TMPDIR=~/tmp bash unpackimg.sh *.img
-        # 检查是否成功解包
-        ls -l split_img/ ramdisk/ 2>/dev/null && echo "AIK 解包成功" || echo "AIK 解包失败，请查看上方日志"
+  - name: ZIP device tree
+    run: zip -r DeviceTree.zip ./dt
 
-    - name: Start build (with TMPDIR fix)
-      run: |
-        export TMPDIR=~/tmp
-        python3 -m twrpdtgen -o dt/ *.img
-
-    - name: ZIP device tree
-      run: |
-        zip -r DeviceTree.zip ./dt
-
-    - name: Upload to Release
-      uses: softprops/action-gh-release@v1
-      with:
-        files: |
-          ./DeviceTree.zip
-        name: TWRP_Device_Tree-${{ github.run_id }}
-        tag_name: ${{ github.run_id }}
-        body: DeviceTree for twrp
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  - name: Upload to Release
+    uses: softprops/action-gh-release@v1
+    with:
+      files: |
+        ./DeviceTree.zip
+      name: TWRP_Device_Tree-${{ github.run_id }}
+      tag_name: ${{ github.run_id }}
+      body: DeviceTree for twrp
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }
