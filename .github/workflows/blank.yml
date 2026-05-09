@@ -11,7 +11,7 @@ on:
 jobs:
   build:
     if: github.event.repository.owner.id == github.event.sender.id
-    runs-on: ubuntu-24.04    # 改成 24.04
+    runs-on: ubuntu-24.04
 
     steps:
     - name: Check Out
@@ -20,26 +20,41 @@ jobs:
     - name: Prepare the environment
       run: |
         sudo apt update
-        # 去掉 python、python-pip；加上 aria2 保证存在
-        sudo apt -y install python3 python3-pip cpio wget aria2 lib32stdc++6 lib32z1 libc6-i386 gzip xz-utils lz4
-        # 使用 --break-system-packages 绕过 Python 外部管理限制
+        sudo apt -y install python3 python3-pip cpio wget aria2 \
+          lib32stdc++6 lib32z1 libc6-i386 gzip xz-utils lz4
         pip3 install --break-system-packages twrpdtgen
-        mkdir dt
-      
+        mkdir -p dt
+
     - name: Download boot or recovery img
       run: |
         aria2c "${{ github.event.inputs.IMG_URL }}"
-        ls
-      
-    - name: Start build
-      run: |
-        python3 -m twrpdtgen -o dt/ *.img
+        ls -lh *.img
 
-    # 后面的 ZIP 和上传步骤无需改动
+    # 关键是设置可执行的临时目录，并手动测试 AIK
+    - name: Debug AIK and fix noexec /tmp
+      run: |
+        # 创建我们自己的临时目录（/home/runner 是可执行的）
+        mkdir -p ~/tmp
+        export TMPDIR=~/tmp
+
+        # 下载 AIK 到工作区测试解包
+        git clone --depth=1 https://github.com/osm0sis/Android-Image-Kitchen /tmp/aik
+        cp *.img /tmp/aik/
+        cd /tmp/aik
+        # 同样指定 TMPDIR，让 AIK 使用我们创建的目录
+        TMPDIR=~/tmp bash unpackimg.sh *.img
+        # 检查是否成功解包
+        ls -l split_img/ ramdisk/ 2>/dev/null && echo "AIK 解包成功" || echo "AIK 解包失败，请查看上方日志"
+
+    - name: Start build (with TMPDIR fix)
+      run: |
+        export TMPDIR=~/tmp
+        python3 -m twrpdtgen -o dt/ *.img
 
     - name: ZIP device tree
       run: |
         zip -r DeviceTree.zip ./dt
+
     - name: Upload to Release
       uses: softprops/action-gh-release@v1
       with:
