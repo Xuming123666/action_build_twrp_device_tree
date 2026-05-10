@@ -10,42 +10,43 @@ on:
 
 jobs:
   build:
-   if: github.event.repository.owner.id == github.event.sender.id
-   runs-on: ubuntu-24.04
+    if: github.event.repository.owner.id == github.event.sender.id
+    runs-on: ubuntu-24.04    # 改成 24.04
 
-   steps:
-   - name: Check Out
-     uses: actions/checkout@main
+    steps:
+    - name: Check Out
+      uses: actions/checkout@main
 
-   - name: Prepare the environment
-     run: |
-       sudo apt update
-       sudo apt -y install python3 python3-pip cpio wget aria2 \
-         lib32stdc++6 lib32z1 libc6-i386 gzip xz-utils lz4
-       pip3 install --break-system-packages twrpdtgen
-       mkdir -p dt
+    - name: Prepare the environment
+      run: |
+        sudo apt update
+        # 去掉 python、python-pip；加上 aria2 保证存在
+        sudo apt -y install python3 python3-pip cpio wget aria2
+        # 使用 --break-system-packages 绕过 Python 外部管理限制
+        pip3 install --break-system-packages twrpdtgen
+        mkdir dt
+      
+    - name: Download boot or recovery img
+      run: |
+        aria2c "${{ github.event.inputs.IMG_URL }}"
+        ls
+      
+    - name: Start build
+      run: |
+        python3 -m twrpdtgen -o dt/ *.img
 
-   - name: Download boot or recovery img
-     run: |
-       aria2c "${{ github.event.inputs.IMG_URL }}"
-       ls -lh *.img
+    # 后面的 ZIP 和上传步骤无需改动
 
-   - name: Start build (fix tmp noexec)
-     run: |
-       mkdir -p ~/tmp
-       export TMPDIR=~/tmp
-       python3 -m twrpdtgen -o dt/ *.img
-
-   - name: ZIP device tree
-     run: zip -r DeviceTree.zip ./dt
-
-   - name: Upload to Release
-     uses: softprops/action-gh-release@v1
-     with:
-       files: |
-         ./DeviceTree.zip
-       name: TWRP_Device_Tree-${{ github.run_id }}
-       tag_name: ${{ github.run_id }}
-       body: DeviceTree for twrp
-     env:
-       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: ZIP device tree
+      run: |
+        zip -r DeviceTree.zip ./dt
+    - name: Upload to Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          ./DeviceTree.zip
+        name: TWRP_Device_Tree-${{ github.run_id }}
+        tag_name: ${{ github.run_id }}
+        body: DeviceTree for twrp
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
