@@ -1,5 +1,4 @@
 name: Make TWRP Device
-
 on:
   workflow_dispatch:
     inputs:
@@ -7,36 +6,32 @@ on:
         description: 'IMG_URL'
         required: true
         default: ''
-
 jobs:
   build:
     if: github.event.repository.owner.id == github.event.sender.id
-    runs-on: ubuntu-24.04    # 改成 24.04
-
+    runs-on: ubuntu-24.04
     steps:
     - name: Check Out
       uses: actions/checkout@main
-
     - name: Prepare the environment
       run: |
         sudo apt update
-        # 去掉 python、python-pip；加上 aria2 保证存在
-        sudo apt -y install python3 python3-pip cpio wget aria2
-        # 使用 --break-system-packages 绕过 Python 外部管理限制
-        pip3 install --break-system-packages twrpdtgen
+        sudo apt -y install python3 python3-pip cpio wget git lz4 brotli zstd libarchive-tools
+        # 安装最新版twrpdtgen（3.1.0+），修复AIK解包问题
+        pip3 install --break-system-packages git+https://github.com/twrpdtgen/twrpdtgen.git
+        # 手动克隆最新版AIK，覆盖内置旧版本
+        git clone https://github.com/osm0sis/Android-Image-Kitchen.git ~/AIK
         mkdir dt
       
     - name: Download boot or recovery img
       run: |
-        aria2c "${{ github.event.inputs.IMG_URL }}"
-        ls
+        wget -O boot.img "${{ github.event.inputs.IMG_URL }}"
+        ls -lh
       
     - name: Start build
       run: |
-        python3 -m twrpdtgen -o dt/ *.img
-
-    # 后面的 ZIP 和上传步骤无需改动
-
+        # 使用系统最新AIK而不是内置旧版本
+        python3 -m twrpdtgen -o dt/ --aik-path ~/AIK boot.img
     - name: ZIP device tree
       run: |
         zip -r DeviceTree.zip ./dt
