@@ -1,4 +1,4 @@
-name: Make TWRP Device
+name: Make TWRP Device (Android 10)
 on:
   workflow_dispatch:
     inputs:
@@ -16,11 +16,10 @@ jobs:
     - name: Prepare the environment
       run: |
         sudo apt update
-        sudo apt -y install python3 python3-pip cpio wget git lz4 brotli zstd libarchive-tools
-        # 安装最新版twrpdtgen（3.1.0+），修复AIK解包问题
-        pip3 install --break-system-packages git+https://github.com/twrpdtgen/twrpdtgen.git
-        # 手动克隆最新版AIK，覆盖内置旧版本
-        git clone https://github.com/osm0sis/Android-Image-Kitchen.git ~/AIK
+        sudo apt -y install python3 python3-pip cpio wget lz4
+        # 强制安装安卓10最兼容的2.1.1版本，彻底解决AIK解包问题
+        pip3 uninstall -y twrpdtgen
+        pip3 install --break-system-packages twrpdtgen==2.1.1
         mkdir dt
       
     - name: Download boot or recovery img
@@ -28,10 +27,9 @@ jobs:
         wget -O boot.img "${{ github.event.inputs.IMG_URL }}"
         ls -lh
       
-    - name: Start build
+    - name: Start build (Android 10专用)
       run: |
-        # 使用系统最新AIK而不是内置旧版本
-        python3 -m twrpdtgen -o dt/ --aik-path ~/AIK boot.img
+        python3 -m twrpdtgen -o dt/ boot.img
     - name: ZIP device tree
       run: |
         zip -r DeviceTree.zip ./dt
@@ -42,6 +40,6 @@ jobs:
           ./DeviceTree.zip
         name: TWRP_Device_Tree-${{ github.run_id }}
         tag_name: ${{ github.run_id }}
-        body: DeviceTree for twrp
+        body: Android 10 TWRP Device Tree
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
