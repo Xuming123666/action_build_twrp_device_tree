@@ -17,9 +17,9 @@ jobs:
       run: |
         sudo apt update
         sudo apt -y install python3 python3-pip cpio wget lz4
-        # 强制安装安卓10最兼容的2.1.1版本，彻底解决AIK解包问题
-        pip3 uninstall -y twrpdtgen
-        pip3 install --break-system-packages twrpdtgen==2.1.1
+        # 彻底卸载所有版本，强制安装PyPI上存在的2.1.0稳定版
+        pip3 uninstall -y twrpdtgen sebaubuntu-libs
+        pip3 install --break-system-packages --no-cache-dir twrpdtgen==2.1.0
         mkdir dt
       
     - name: Download boot or recovery img
