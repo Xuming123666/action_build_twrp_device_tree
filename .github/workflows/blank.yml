@@ -9,54 +9,52 @@ on:
 jobs:
   build:
     if: github.event.repository.owner.id == github.event.sender.id
-    runs-on: ubuntu-24.04  # 用最快的24.04，不用排队
+    runs-on: ubuntu-24.04
     steps:
     - name: Check Out
       uses: actions/checkout@main
       
-    - name: Setup Python 3.10 (核心修复)
+    - name: Setup Python 3.10
       uses: actions/setup-python@v5
       with:
         python-version: '3.10'
-        cache: 'pip'  # 缓存pip依赖，下次运行快10倍
+        # 移除了导致错误的cache: pip参数
       
     - name: Prepare the environment
       run: |
         sudo apt update
         sudo apt -y install cpio wget lz4 git
-        # 用Python 3.10的pip安装，完全隔离系统Python 3.12
         python3 -m pip uninstall -y twrpdtgen sebaubuntu-libs
         python3 -m pip install --break-system-packages twrpdtgen==2.1.0
-        # 手动替换内置AIK为最新版
-        git clone https://github.com/osm0sis/Android-Image-Kitchen.git ~/AIK
-        # 找到twrpdtgen内置的AIK目录并替换
+        # 手动替换内置AIK为最新官方版
+        git clone --depth 1 https://github.com/osm0sis/Android-Image-Kitchen.git ~/AIK
         AIK_DIR=$(python3 -c "import twrpdtgen.utils.aikmanager; print(twrpdtgen.utils.aikmanager.__file__.replace('aikmanager.py', 'aik'))")
         rm -rf "$AIK_DIR"
-        cp -r ~/AIK "$AIK_DIR"
+        cp -r ~/AIK/* "$AIK_DIR"
         chmod +x "$AIK_DIR"/unpackimg.sh "$AIK_DIR"/repackimg.sh
         mkdir dt
       
-    - name: Download boot or recovery img
+    - name: Download boot.img
       run: |
-        wget -O boot.img "${{ github.event.inputs.IMG_URL }}"
+        wget -O boot.img --tries=5 --retry-connrefused "${{ github.event.inputs.IMG_URL }}"
         ls -lh boot.img
-        # 检查文件大小，确保下载完整
-        if [ $(stat -c %s boot.img) -lt 10000000 ]; then
-          echo "ERROR: boot.img too small, download failed"
+        # 检查文件完整性
+        if [ $(stat -c %s boot.img) -lt 8000000 ]; then
+          echo "ERROR: boot.img下载不完整"
           exit 1
         fi
       
-    - name: Start build (Android 10专用)
+    - name: Generate TWRP Device Tree
       run: |
-        python3 -m twrpdtgen -d -o dt/ boot.img
-    - name: ZIP device tree
-      run: |
-        zip -r DeviceTree.zip ./dt
+        python3 -m twrpdtgen -o dt/ boot.img
+      
+    - name: Package and Upload
+      run: zip -r DeviceTree.zip ./dt
+      
     - name: Upload to Release
       uses: softprops/action-gh-release@v1
       with:
-        files: |
-          ./DeviceTree.zip
+        files: DeviceTree.zip
         name: TWRP_Device_Tree-${{ github.run_id }}
         tag_name: ${{ github.run_id }}
         body: Android 10 TWRP Device Tree
