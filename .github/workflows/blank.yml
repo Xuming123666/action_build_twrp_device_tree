@@ -1,4 +1,5 @@
-name: Make TWRP Device (Android 10)
+name: Make TWRP Device
+
 on:
   workflow_dispatch:
     inputs:
@@ -6,60 +7,34 @@ on:
         description: 'IMG_URL'
         required: true
         default: ''
+
 jobs:
   build:
     if: github.event.repository.owner.id == github.event.sender.id
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+
     steps:
     - name: Check Out
       uses: actions/checkout@main
-      
-    - name: Setup Python 3.10
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
-      
-    - name: Prepare Environment
+
+    - name: Prepare the environment
       run: |
         sudo apt update
-        sudo apt -y install cpio wget lz4 git
-        # 只安装twrpdtgen，不碰任何内置文件
-        python3 -m pip uninstall -y twrpdtgen sebaubuntu-libs
-        python3 -m pip install --break-system-packages twrpdtgen==2.1.0
-        # 克隆最新官方AIK
-        git clone --depth 1 https://github.com/osm0sis/Android-Image-Kitchen.git ~/AIK
-        chmod +x ~/AIK/unpackimg.sh ~/AIK/repackimg.sh
+        sudo apt -y install python2 python3 python3-pip cpio wget
+        pip3 install twrpdtgen
         mkdir dt
       
-    - name: Download boot.img
+    - name: Download boot or recovery img
       run: |
-        wget -O boot.img --tries=5 --retry-connrefused "${{ github.event.inputs.IMG_URL }}"
-        ls -lh boot.img
-        if [ $(stat -c %s boot.img) -lt 8000000 ]; then
-          echo "ERROR: boot.img下载不完整"
-          exit 1
-        fi
-      
-    - name: 手动用最新AIK解包（核心修复）
+        aria2c "${{ github.event.inputs.IMG_URL }}"
+        ls
+    - name: Start build
       run: |
-        cd ~/AIK
-        ./unpackimg.sh /home/runner/work/action_build_twrp_device_tree/action_build_twrp_device_tree/boot.img
-        ls -la split_img/ ramdisk/
-      
-    - name: 用twrpdtgen生成设备树
+        python3 -m twrpdtgen -o dt/ *.img
+    - name: ZIP device tree
       run: |
-        # 直接处理AIK解包后的目录，完全绕过内置AIK
-        python3 -m twrpdtgen -o dt/ ~/AIK
-      
-    - name: Package and Upload
-      run: zip -r DeviceTree.zip ./dt
-      
-    - name: Upload to Release
-      uses: softprops/action-gh-release@v1
+        zip -r DeviceTree.zip ./dt
+    - name: Upload devicetree to artifact
+      uses: actions/upload-artifact@v3
       with:
-        files: DeviceTree.zip
-        name: TWRP_Device_Tree-${{ github.run_id }}
-        tag_name: ${{ github.run_id }}
-        body: Android 10 TWRP Device Tree
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        path: DeviceTree.zip
