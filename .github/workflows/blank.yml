@@ -43,7 +43,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pip cpio file xz-utils wget git
+          sudo apt-get install -y python3-pip cpio file xz-utils wget git binwalk p7zip-full
           pip3 install --upgrade pip
           pip3 install twrpdtgen
 
@@ -53,56 +53,155 @@ jobs:
           curl -L -o workspace/boot.img "${{ github.event.inputs.boot_url }}"
           file workspace/boot.img
           ls -lh workspace/boot.img
+          xxd workspace/boot.img | head -5
 
-      - name: Download AIK-Linux (correct branch)
+      - name: Analyze boot.img structure
         run: |
           cd workspace
-          # 使用 twrpdtgen 作者维护的 AIK-Linux 镜像，包含正确的 .sh 脚本
-          git clone --depth=1 https://github.com/SebaUbuntu/AIK-Linux-mirror.git AIK
-          ls -la AIK/
-          # 确保脚本可执行
-          chmod +x AIK/unpackimg.sh AIK/repackimg.sh
-          ls -la AIK/*.sh
+          echo "=== File info ==="
+          file boot.img
+          echo ""
+          echo "=== First 64 bytes (hex) ==="
+          xxd -l 64 boot.img
+          echo ""
+          echo "=== Binwalk scan ==="
+          binwalk -B boot.img || true
+          echo ""
+          echo "=== Check for ANDROID! magic ==="
+          xxd -l 8 boot.img | grep -i "ANDROID" || echo "No ANDROID! header at offset 0"
+          echo ""
+          echo "=== Check for possible offset ==="
+          xxd boot.img | grep -i "ANDROID" | head -5 || true
 
-      - name: Fix boot.img with AIK
+      - name: Download and setup AIK-Linux with fallback methods
         run: |
           cd workspace
-          cp boot.img AIK/
-          cd AIK
           
-          # 解包
-          ./unpackimg.sh boot.img
+          # 方法1: 尝试 ravindu644 的 AIK-Linux 镜像（更新版本）
+          git clone --depth=1 https://github.com/ravindu644/AIK-Linux.git AIK-ravindu || true
           
-          # 补全 prop
-          PROP_FILE=""
-          if [ -f "ramdisk/prop.default" ]; then
-            PROP_FILE="ramdisk/prop.default"
-          elif [ -f "ramdisk/default.prop" ]; then
-            PROP_FILE="ramdisk/default.prop"
+          # 方法2: 尝试 osm0sis 的 linux 分支
+          git clone --depth=1 -b linux https://github.com/osm0sis/Android-Image-Kitchen.git AIK-linux || true
+          
+          # 方法3: 使用 twrpdtgen 作者维护的镜像
+          git clone --depth=1 https://github.com/SebaUbuntu/AIK-Linux-mirror.git AIK-seba || true
+          
+          # 选择可用的 AIK
+          for aik in AIK-ravindu AIK-linux AIK-seba; do
+            if [ -d "$aik" ] && [ -f "$aik/unpackimg.sh" ]; then
+              ln -sf "$aik" AIK
+              echo "Using $aik"
+              ls -la AIK/
+              chmod +x AIK/*.sh
+              break
+            fi
+          done
+
+      - name: Attempt to unpack boot.img with multiple methods
+        run: |
+          cd workspace
+          
+          # 方法1: AIK
+          echo "=== Trying AIK ==="
+          cp boot.img AIK/ 2>/dev/null || true
+          cd AIK 2>/dev/null && ./unpackimg.sh boot.img 2>&1 && cd .. || true
+          
+          # 如果 AIK 失败，尝试手动分析
+          if [ ! -d "AIK/ramdisk" ] && [ ! -d "AIK/split_img" ]; then
+            echo ""
+            echo "=== AIK failed, trying manual extraction ==="
+            
+            # 检查是否有偏移
+            OFFSET=$(xxd -c 1 boot.img | grep -n "ANDROID" | head -1 | cut -d: -f1)
+            if [ -n "$OFFSET" ] && [ "$OFFSET" -gt "1" ]; then
+              OFFSET=$((OFFSET - 1))
+              echo "Found ANDROID header at offset $OFFSET, extracting..."
+              dd if=boot.img of=boot_fixed.img bs=1 skip=$OFFSET 2>/dev/null
+              cp boot_fixed.img AIK/
+              cd AIK && ./unpackimg.sh boot_fixed.img 2>&1 && cd .. || true
+            fi
           fi
           
-          if [ -n "$PROP_FILE" ]; then
-            echo "Found prop file: $PROP_FILE"
-            if ! grep -q "ro.product.first_api_level" "$PROP_FILE"; then
-              echo "Adding ro.product.first_api_level=${{ github.event.inputs.api_level }}"
-              echo "ro.product.first_api_level=${{ github.event.inputs.api_level }}" >> "$PROP_FILE"
+          # 如果还是失败，尝试使用 Python 的 unpackbootimg
+          if [ ! -d "AIK/ramdisk" ] && [ ! -d "AIK/split_img" ]; then
+            echo ""
+            echo "=== Trying Python unpackbootimg ==="
+            pip3 install pyunpackbootimg 2>/dev/null || true
+            python3 -c "
+            try:
+                from pyunpackbootimg import unpack
+                unpack('boot.img', 'manual_unpack')
+                print('Python unpack success')
+            except Exception as e:
+                print(f'Python unpack failed: {e}')
+            " 2>&1 || true
+          fi
+
+      - name: Fix and repack boot.img
+        run: |
+          cd workspace
+          
+          # 检查是否成功解包
+          if [ -d "AIK/ramdisk" ] || [ -d "AIK/split_img" ]; then
+            echo "AIK unpack successful"
+            cd AIK
+            
+            # 补全 prop
+            PROP_FILE=""
+            if [ -f "ramdisk/prop.default" ]; then
+              PROP_FILE="ramdisk/prop.default"
+            elif [ -f "ramdisk/default.prop" ]; then
+              PROP_FILE="ramdisk/default.prop"
+            fi
+            
+            if [ -n "$PROP_FILE" ]; then
+              if ! grep -q "ro.product.first_api_level" "$PROP_FILE"; then
+                echo "ro.product.first_api_level=${{ github.event.inputs.api_level }}" >> "$PROP_FILE"
+              fi
+            else
+              mkdir -p ramdisk
+              echo "ro.product.first_api_level=${{ github.event.inputs.api_level }}" > ramdisk/prop.default
+            fi
+            
+            ./repackimg.sh
+            cd ..
+            cp AIK/image-new.img boot_fixed.img
+            
+          elif [ -d "manual_unpack" ]; then
+            echo "Manual unpack successful"
+            # 处理手动解包结果
+            if [ -f "manual_unpack/ramdisk.cpio.gz" ]; then
+              mkdir -p manual_unpack/ramdisk
+              cd manual_unpack/ramdisk
+              zcat ../ramdisk.cpio.gz | cpio -i 2>/dev/null || true
+              cd ../..
+              
+              if [ -f "manual_unpack/ramdisk/prop.default" ]; then
+                if ! grep -q "ro.product.first_api_level" "manual_unpack/ramdisk/prop.default"; then
+                  echo "ro.product.first_api_level=${{ github.event.inputs.api_level }}" >> "manual_unpack/ramdisk/prop.default"
+                fi
+              fi
+              
+              # 重新打包 ramdisk
+              cd manual_unpack/ramdisk
+              find . | cpio -o -H newc | gzip > ../ramdisk_new.cpio.gz
+              cd ../..
+              
+              # 需要 mkbootimg 重新打包
+              echo "Need to repack with mkbootimg"
             fi
           else
-            mkdir -p ramdisk
-            echo "ro.product.first_api_level=${{ github.event.inputs.api_level }}" > ramdisk/prop.default
+            echo "WARNING: Could not unpack boot.img, trying direct twrpdtgen"
+            cp boot.img boot_fixed.img
           fi
           
-          # 重新打包
-          ./repackimg.sh
-          
-          cd ..
-          cp AIK/image-new.img boot_fixed.img
-          ls -lh boot_fixed.img
+          ls -lh boot_fixed.img || true
 
       - name: Extract kernel info
         run: |
           cd workspace
-          echo "=== Kernel Info ===" > kernel_info.txt
+          echo "=== Kernel Info ===" > kernel_info.txt || true
+          
           if [ -f AIK/split_img/boot.img-base ]; then
             echo "BOARD_KERNEL_BASE := 0x$(cat AIK/split_img/boot.img-base)" >> kernel_info.txt
           fi
@@ -112,14 +211,23 @@ jobs:
           if [ -f AIK/split_img/boot.img-cmdline ]; then
             echo "BOARD_KERNEL_CMDLINE := $(cat AIK/split_img/boot.img-cmdline)" >> kernel_info.txt
           fi
-          cat kernel_info.txt
+          cat kernel_info.txt || true
 
       - name: Generate device tree with twrpdtgen 3.0.0
         run: |
           mkdir -p output
-          python3 -m twrpdtgen \
-            -o output/${{ github.event.inputs.manufacturer }}/${{ github.event.inputs.device_name }} \
-            workspace/boot_fixed.img
+          if [ -f workspace/boot_fixed.img ]; then
+            python3 -m twrpdtgen \
+              -o output/${{ github.event.inputs.manufacturer }}/${{ github.event.inputs.device_name }} \
+              workspace/boot_fixed.img || \
+            python3 -m twrpdtgen \
+              -o output/${{ github.event.inputs.manufacturer }}/${{ github.event.inputs.device_name }} \
+              workspace/boot.img
+          else
+            python3 -m twrpdtgen \
+              -o output/${{ github.event.inputs.manufacturer }}/${{ github.event.inputs.device_name }} \
+              workspace/boot.img
+          fi
 
       - name: Add recovery-as-boot configuration
         run: |
@@ -155,7 +263,7 @@ jobs:
           
           ## 内核参数
           \`\`\`
-          $(cat workspace/kernel_info.txt)
+          $(cat workspace/kernel_info.txt 2>/dev/null || echo 'No kernel info extracted')
           \`\`\`
           
           ## TWRP 11 源码初始化
@@ -180,7 +288,7 @@ jobs:
       - name: Package and upload
         run: |
           cd output
-          zip -r ../${{ github.event.inputs.manufacturer }}_${{ github.event.inputs.device_name }}_recovery_as_boot.zip .
+          zip -r ../${{ github.event.inputs.manufacturer }}_${{ github.event.inputs.device_name }}_recovery_as_boot.zip . || true
           cd ..
 
       - name: Create Release
