@@ -8,11 +8,11 @@ on:
         required: true
         type: string
       device_name:
-        description: '设备代号（如 mi8）'
+        description: '设备代号（如 msm8998）'
         required: true
         type: string
       manufacturer:
-        description: '厂商名称（如 xiaomi）'
+        description: '厂商名称（如 Readboy）'
         required: true
         type: string
 
@@ -30,7 +30,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pip cpio file
+          sudo apt-get install -y python3-pip cpio file git
           pip3 install --upgrade pip
           pip3 install twrpdtgen
 
@@ -40,15 +40,12 @@ jobs:
           curl -L -o workspace/boot.img "${{ github.event.inputs.boot_url }}"
           file workspace/boot.img
 
-      - name: Generate device tree with twrpdtgen
+      - name: Generate device tree with twrpdtgen 3.0.0
         run: |
           mkdir -p output
-          # 使用 -o 指定输出目录，支持 Android 10 boot.img
+          # twrpdtgen 3.0.0 只支持 -o 参数，其他旧参数已移除
           python3 -m twrpdtgen \
             -o output/${{ github.event.inputs.manufacturer }}/${{ github.event.inputs.device_name }} \
-            -k \
-            --no-git \
-            -v \
             workspace/boot.img
         continue-on-error: false
 
