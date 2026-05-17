@@ -43,7 +43,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pip cpio file git xz-utils android-sdk-libsparse-utils
+          sudo apt-get install -y python3-pip cpio file xz-utils wget
           pip3 install --upgrade pip
           pip3 install twrpdtgen
 
@@ -54,17 +54,26 @@ jobs:
           file workspace/boot.img
           ls -lh workspace/boot.img
 
-      - name: Download and setup Android Image Kitchen
+      - name: Download and extract AIK-Linux
         run: |
           cd workspace
-          git clone --depth=1 https://github.com/osm0sis/Android-Image-Kitchen.git AIK
-          chmod +x AIK/unpackimg.sh AIK/repackimg.sh
+          # 直接下载 XDA 上的稳定版本，避免 git clone 问题
+          wget -q https://github.com/osm0sis/Android-Image-Kitchen/archive/refs/heads/master.tar.gz -O aik.tar.gz
+          tar xzf aik.tar.gz
+          # 重命名为 AIK
+          mv Android-Image-Kitchen-master AIK
+          ls -la AIK/
+          # 确保脚本存在并可执行
+          chmod +x AIK/unpackimg.sh AIK/repackimg.sh || true
+          ls -la AIK/*.sh
 
-      - name: Fix boot.img and extract kernel info
+      - name: Fix boot.img with AIK
         run: |
           cd workspace
           cp boot.img AIK/
           cd AIK
+          
+          # 解包
           ./unpackimg.sh boot.img
           
           # 补全 prop
@@ -76,7 +85,9 @@ jobs:
           fi
           
           if [ -n "$PROP_FILE" ]; then
+            echo "Found prop file: $PROP_FILE"
             if ! grep -q "ro.product.first_api_level" "$PROP_FILE"; then
+              echo "Adding ro.product.first_api_level=${{ github.event.inputs.api_level }}"
               echo "ro.product.first_api_level=${{ github.event.inputs.api_level }}" >> "$PROP_FILE"
             fi
           else
@@ -84,12 +95,17 @@ jobs:
             echo "ro.product.first_api_level=${{ github.event.inputs.api_level }}" > ramdisk/prop.default
           fi
           
+          # 重新打包
           ./repackimg.sh
+          
           cd ..
           cp AIK/image-new.img boot_fixed.img
-          
-          # 提取内核参数供参考
-          echo "=== Kernel Info from original boot ===" > kernel_info.txt
+          ls -lh boot_fixed.img
+
+      - name: Extract kernel info
+        run: |
+          cd workspace
+          echo "=== Kernel Info ===" > kernel_info.txt
           if [ -f AIK/split_img/boot.img-base ]; then
             echo "BOARD_KERNEL_BASE := 0x$(cat AIK/split_img/boot.img-base)" >> kernel_info.txt
           fi
@@ -98,9 +114,6 @@ jobs:
           fi
           if [ -f AIK/split_img/boot.img-cmdline ]; then
             echo "BOARD_KERNEL_CMDLINE := $(cat AIK/split_img/boot.img-cmdline)" >> kernel_info.txt
-          fi
-          if [ -f AIK/split_img/boot.img-board ]; then
-            echo "BOARD_NAME := $(cat AIK/split_img/boot.img-board)" >> kernel_info.txt
           fi
           cat kernel_info.txt
 
@@ -119,7 +132,6 @@ jobs:
           if [ -f "$BOARDCONFIG" ]; then
             cp "$BOARDCONFIG" "${BOARDCONFIG}.bak"
             
-            # 在文件末尾添加 recovery-as-boot 配置
             cat >> "$BOARDCONFIG" << EOF
             
           # === recovery-as-boot Configuration ===
@@ -132,15 +144,10 @@ jobs:
           AB_OTA_PARTITIONS += boot
           EOF
             fi
-            
-            cat >> "$BOARDCONFIG" << EOF
-          
-          # 编译目标
-          # mka bootimage  # 生成可启动的 boot.img
-          EOF
           fi
-          
-          # 创建 recovery-as-boot 说明文档
+
+      - name: Create adaptation guide
+        run: |
           cat > output/RECOVERY_AS_BOOT_GUIDE.md << EOF
           # Recovery-as-Boot 编译指南
           
@@ -149,44 +156,18 @@ jobs:
           - 设备: ${{ github.event.inputs.device_name }}
           - A/B 设备: ${{ github.event.inputs.is_ab_device }}
           
-          ## 从原 boot.img 提取的内核参数
+          ## 内核参数
           \`\`\`
           $(cat workspace/kernel_info.txt)
           \`\`\`
           
-          ## 编译步骤
-          
-          ### 1. 初始化 TWRP 11 源码
+          ## TWRP 11 源码初始化
           \`\`\`bash
           repo init -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git -b twrp-11
           repo sync -c -j\$(nproc --all)
           \`\`\`
           
-          ### 2. 放置设备树
-          \`\`\`bash
-          mkdir -p device/${{ github.event.inputs.manufacturer }}/${{ github.event.inputs.device_name }}
-          # 复制所有生成的文件到上述目录
-          \`\`\`
-          
-          ### 3. 配置 kernel（重要！）
-          将原 boot.img 中的内核提取出来：
-          \`\`\`bash
-          # 从 AIK 解包目录复制
-          cp workspace/AIK/split_img/boot.img-zImage device/${{ github.event.inputs.manufacturer }}/${{ github.event.inputs.device_name }}/prebuilt/kernel
-          
-          # 如果有 dtb
-          cp workspace/AIK/split_img/boot.img-dtb device/${{ github.event.inputs.manufacturer }}/${{ github.event.inputs.device_name }}/prebuilt/dtb
-          \`\`\`
-          
-          然后在 BoardConfig.mk 中设置：
-          \`\`\`makefile
-          TARGET_PREBUILT_KERNEL := \$(LOCAL_PATH)/prebuilt/kernel
-          BOARD_KERNEL_CMDLINE := <从 kernel_info.txt 复制>
-          BOARD_KERNEL_BASE := <从 kernel_info.txt 复制>
-          BOARD_KERNEL_PAGESIZE := <从 kernel_info.txt 复制>
-          \`\`\`
-          
-          ### 4. 编译
+          ## 编译
           \`\`\`bash
           source build/envsetup.sh
           lunch twrp_${{ github.event.inputs.device_name }}-eng
@@ -195,45 +176,23 @@ jobs:
           
           ## 刷入
           \`\`\`bash
-          # 临时启动测试
           fastboot boot out/target/product/${{ github.event.inputs.device_name }}/boot.img
-          
-          # 永久刷入（A/B 设备刷入两个 slot）
-          fastboot flash boot_a out/target/product/${{ github.event.inputs.device_name }}/boot.img
-          fastboot flash boot_b out/target/product/${{ github.event.inputs.device_name }}/boot.img
           \`\`\`
-          
-          ## 注意事项
-          1. 确保 \`BOARD_BOOTIMAGE_PARTITION_SIZE\` 和原 boot 分区大小一致
-          2. 如果编译后的镜像太大，可能需要精简 TWRP 功能
-          3. 某些设备需要特定的 \`BOARD_MKBOOTIMG_ARGS\` 参数
           EOF
 
-      - name: Package device tree
+      - name: Package and upload
         run: |
           cd output
           zip -r ../${{ github.event.inputs.manufacturer }}_${{ github.event.inputs.device_name }}_recovery_as_boot.zip .
           cd ..
-          ls -lh *.zip
 
-      - name: Create Release and Upload Asset
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: recovery-as-boot-${{ github.event.inputs.manufacturer }}-${{ github.event.inputs.device_name }}-${{ github.run_number }}
           name: "Recovery-as-Boot Device Tree - ${{ github.event.inputs.manufacturer }} ${{ github.event.inputs.device_name }}"
           body: |
             为 recovery-as-boot 模式生成的 TWRP 设备树
-            
-            📦 包含内容:
-            - 自动生成的设备树文件
-            - kernel_info.txt: 原 boot.img 内核参数
-            - RECOVERY_AS_BOOT_GUIDE.md: 完整编译刷入指南
-            
-            🔧 关键配置已自动添加:
-            - BOARD_USES_RECOVERY_AS_BOOT := true
-            - AB_OTA 配置（如适用）
-            
-            ⚠️ 重要: 需要手动提取原 boot 的内核并放入 prebuilt 目录！
             
             - 厂商: ${{ github.event.inputs.manufacturer }}
             - 设备: ${{ github.event.inputs.device_name }}
