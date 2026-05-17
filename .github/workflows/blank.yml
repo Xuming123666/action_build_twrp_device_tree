@@ -43,7 +43,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pip cpio file xz-utils wget
+          sudo apt-get install -y python3-pip cpio file xz-utils wget git
           pip3 install --upgrade pip
           pip3 install twrpdtgen
 
@@ -54,17 +54,14 @@ jobs:
           file workspace/boot.img
           ls -lh workspace/boot.img
 
-      - name: Download and extract AIK-Linux
+      - name: Download AIK-Linux (correct branch)
         run: |
           cd workspace
-          # 直接下载 XDA 上的稳定版本，避免 git clone 问题
-          wget -q https://github.com/osm0sis/Android-Image-Kitchen/archive/refs/heads/master.tar.gz -O aik.tar.gz
-          tar xzf aik.tar.gz
-          # 重命名为 AIK
-          mv Android-Image-Kitchen-master AIK
+          # 使用 twrpdtgen 作者维护的 AIK-Linux 镜像，包含正确的 .sh 脚本
+          git clone --depth=1 https://github.com/SebaUbuntu/AIK-Linux-mirror.git AIK
           ls -la AIK/
-          # 确保脚本存在并可执行
-          chmod +x AIK/unpackimg.sh AIK/repackimg.sh || true
+          # 确保脚本可执行
+          chmod +x AIK/unpackimg.sh AIK/repackimg.sh
           ls -la AIK/*.sh
 
       - name: Fix boot.img with AIK
