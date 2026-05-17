@@ -44,7 +44,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y python3-pip cpio file xz-utils wget git
-          # 关键：确保 file 命令可用（AIK 依赖它）
           file --version
           pip3 install --upgrade pip
           pip3 install twrpdtgen
@@ -56,28 +55,23 @@ jobs:
           file workspace/boot.img
           ls -lh workspace/boot.img
 
-      - name: Download magiskboot (more reliable than AIK)
+      - name: Download magiskboot
         run: |
           cd workspace
-          # 下载预编译的 magiskboot
           wget -q https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk -O magisk.zip
           unzip -o magisk.zip -d magisk_extracted || true
-          # 尝试从 apk 中提取 magiskboot
-          if [ -f "magisk_extracted/lib/arm64-v8a/libmagiskboot.so" ]; then
-            cp magisk_extracted/lib/arm64-v8a/libmagiskboot.so magiskboot
-            chmod +x magiskboot
-          elif [ -f "magisk_extracted/lib/x86_64/libmagiskboot.so" ]; then
+          
+          if [ -f "magisk_extracted/lib/x86_64/libmagiskboot.so" ]; then
             cp magisk_extracted/lib/x86_64/libmagiskboot.so magiskboot
             chmod +x magiskboot
           fi
           
-          # 备用方案：直接下载 standalone magiskboot
           if [ ! -f "magiskboot" ]; then
             wget -q https://github.com/pinnacode/magiskboot_build/releases/download/last-ci/magiskboot-x86_64-linux -O magiskboot
             chmod +x magiskboot
           fi
           
-          ./magiskboot --version 2>/dev/null || echo "magiskboot downloaded"
+          ./magiskboot --version 2>/dev/null || echo "magiskboot ready"
 
       - name: Unpack boot.img with magiskboot and fix prop
         run: |
@@ -85,19 +79,15 @@ jobs:
           mkdir -p boot_out
           cd boot_out
           
-          # 用 magiskboot 解包
           ../magiskboot unpack -h ../boot.img 2>&1 || true
-          
           ls -la
           
-          # 提取 ramdisk
           if [ -f "ramdisk.cpio" ]; then
             mkdir -p ramdisk
             cd ramdisk
             ../magiskboot cpio ../ramdisk.cpio extract 2>&1 || true
             cd ..
             
-            # 补全 prop
             PROP_FILE=""
             if [ -f "ramdisk/prop.default" ]; then
               PROP_FILE="ramdisk/prop.default"
@@ -107,98 +97,80 @@ jobs:
             
             if [ -n "$PROP_FILE" ]; then
               echo "Found prop file: $PROP_FILE"
+              cat "$PROP_FILE" | grep -i "ro.product" || true
               if ! grep -q "ro.product.first_api_level" "$PROP_FILE"; then
-                echo "Adding ro.product.first_api_level=${{ github.event.inputs.api_level }}"
                 echo "ro.product.first_api_level=${{ github.event.inputs.api_level }}" >> "$PROP_FILE"
+                echo "Added ro.product.first_api_level"
               fi
             else
               mkdir -p ramdisk
               echo "ro.product.first_api_level=${{ github.event.inputs.api_level }}" > ramdisk/prop.default
+              echo "Created prop.default"
             fi
             
-            # 重新打包 ramdisk
+            # 重新打包
             cd ramdisk
             find . | cpio -o -H newc > ../ramdisk_new.cpio
             cd ..
             mv ramdisk_new.cpio ramdisk.cpio
-            
-            # 重新打包 boot.img
             ../magiskboot repack ../boot.img boot_fixed.img 2>&1 || true
             
             if [ -f "boot_fixed.img" ]; then
               cp boot_fixed.img ../boot_fixed.img
+              echo "Created boot_fixed.img"
             fi
           fi
           
           cd ..
-          ls -lh boot_fixed.img 2>/dev/null || cp boot.img boot_fixed.img
-
-      - name: Setup AIK for twrpdtgen (fix built-in AIK)
-        run: |
-          cd workspace
-          # twrpdtgen 3.0.0 使用 sebaubuntu_libs/libaik，它会自动克隆 AIK
-          # 我们预先克隆一个可用的 AIK 到它期望的位置
-          # 先找到 libaik 的 AIK 目录
-          python3 -c "
-          import sebaubuntu_libs.libaik as libaik
-          import inspect
-          import os
-          aik_path = os.path.dirname(inspect.getfile(libaik))
-          print(f'libaik path: {aik_path}')
-          " > aik_path.txt 2>/dev/null || true
-          
-          # 或者直接在用户目录下创建 AIK（twrpdtgen 可能在这里查找）
-          mkdir -p ~/.local/share/sebaubuntu_libs/libaik
-          if [ ! -d ~/.local/share/sebaubuntu_libs/libaik/AIK-Linux-mirror ]; then
-            git clone --depth=1 https://github.com/SebaUbuntu/AIK-Linux-mirror.git ~/.local/share/sebaubuntu_libs/libaik/AIK-Linux-mirror || true
-          fi
-          
-          # 确保 AIK 脚本可执行
-          if [ -d ~/.local/share/sebaubuntu_libs/libaik/AIK-Linux-mirror ]; then
-            chmod +x ~/.local/share/sebaubuntu_libs/libaik/AIK-Linux-mirror/*.sh
-          fi
+          ls -lh boot_fixed.img 2>/dev/null || (cp boot.img boot_fixed.img && echo "Using original boot.img")
 
       - name: Generate device tree with twrpdtgen 3.0.0
         run: |
           mkdir -p output
-          # 尝试用修复后的 boot.img
-          python3 -m twrpdtgen \
-            -o output/${{ github.event.inputs.manufacturer }}/${{ github.event.inputs.device_name }} \
-            workspace/boot_fixed.img 2>&1 || \
-          # 如果失败，尝试原始 boot.img
-          python3 -m twrpdtgen \
-            -o output/${{ github.event.inputs.manufacturer }}/${{ github.event.inputs.device_name }} \
-            workspace/boot.img 2>&1 || \
-          # 如果还是失败，使用 Python 脚本手动调用 DeviceTree 并传入已解包的信息
-          echo "twrpdtgen failed, will try manual generation"
-
-      - name: Manual device tree generation fallback
-        if: failure()
-        run: |
-          cd workspace
-          # 如果 twrpdtgen 完全失败，我们用 magiskboot 提取的信息手动生成基础设备树
-          mkdir -p output/${{ github.event.inputs.manufacturer }}/${{ github.event.inputs.device_name }}
-          DEVICE_PATH="output/${{ github.event.inputs.manufacturer }}/${{ github.event.inputs.device_name }}"
+          echo "=== Running twrpdtgen ==="
           
-          # 读取 magiskboot 解包的信息
-          KERNEL=""
-          if [ -f "boot_out/kernel" ]; then
-            KERNEL="kernel"
+          # 先尝试修复后的 boot.img
+          if [ -f "workspace/boot_fixed.img" ]; then
+            echo "Trying boot_fixed.img..."
+            python3 -m twrpdtgen \
+              -o output/${{ github.event.inputs.manufacturer }}/${{ github.event.inputs.device_name }} \
+              workspace/boot_fixed.img 2>&1 && echo "SUCCESS with boot_fixed.img" || echo "FAILED with boot_fixed.img"
           fi
           
-          # 创建基础 BoardConfig.mk
-          cat > $DEVICE_PATH/BoardConfig.mk << EOF
+          # 检查是否成功生成
+          DEVICE_PATH="output/${{ github.event.inputs.manufacturer }}/${{ github.event.inputs.device_name }}"
+          echo "Checking output at: $DEVICE_PATH"
+          ls -la output/ 2>/dev/null || true
+          ls -la "$DEVICE_PATH" 2>/dev/null || true
+
+      - name: Manual fallback if twrpdtgen failed
+        run: |
+          DEVICE_PATH="output/${{ github.event.inputs.manufacturer }}/${{ github.event.inputs.device_name }}"
+          
+          # 如果 twrpdtgen 没有生成任何文件，手动创建
+          if [ ! -f "$DEVICE_PATH/BoardConfig.mk" ]; then
+            echo "=== twrpdtgen failed, creating manual device tree ==="
+            mkdir -p "$DEVICE_PATH/prebuilt"
+            
+            # 从 magiskboot 提取的信息创建 BoardConfig.mk
+            cat > "$DEVICE_PATH/BoardConfig.mk" << EOF
           DEVICE_PATH := device/${{ github.event.inputs.manufacturer }}/${{ github.event.inputs.device_name }}
           
           # For building with minimal manifest
           ALLOW_MISSING_DEPENDENCIES := true
           
-          # Architecture
+          # Architecture (default to arm64, adjust if needed)
           TARGET_ARCH := arm64
           TARGET_ARCH_VARIANT := armv8-a
           TARGET_CPU_ABI := arm64-v8a
           TARGET_CPU_ABI2 :=
           TARGET_CPU_VARIANT := generic
+          
+          TARGET_2ND_ARCH := arm
+          TARGET_2ND_ARCH_VARIANT := armv7-a-neon
+          TARGET_2ND_CPU_ABI := armeabi-v7a
+          TARGET_2ND_CPU_ABI2 := armeabi
+          TARGET_2ND_CPU_VARIANT := generic
           
           # Assert
           TARGET_OTA_ASSERT_DEVICE := ${{ github.event.inputs.device_name }}
@@ -207,6 +179,7 @@ jobs:
           BOARD_HAS_LARGE_FILESYSTEM := true
           BOARD_SYSTEMIMAGE_PARTITION_TYPE := ext4
           BOARD_USERDATAIMAGE_FILE_SYSTEM_TYPE := ext4
+          BOARD_VENDORIMAGE_FILE_SYSTEM_TYPE := ext4
           TARGET_USERIMAGES_USE_EXT4 := true
           TARGET_USERIMAGES_USE_F2FS := true
           
@@ -215,46 +188,74 @@ jobs:
           BOARD_KERNEL_CMDLINE := androidboot.hardware=qcom
           BOARD_KERNEL_BASE := 0x80000000
           BOARD_KERNEL_PAGESIZE := 2048
+          BOARD_RAMDISK_OFFSET := 0x01000000
+          BOARD_KERNEL_TAGS_OFFSET := 0x00000100
+          
+          # Platform
+          TARGET_BOARD_PLATFORM := msm8998
+          
+          # Recovery
+          TARGET_RECOVERY_PIXEL_FORMAT := RGBX_8888
+          TARGET_RECOVERY_FSTAB := \$(DEVICE_PATH)/recovery.fstab
+          BOARD_HAS_NO_SELECT_BUTTON := true
+          
+          # TWRP specific
+          TW_THEME := portrait_hdpi
+          TW_INCLUDE_CRYPTO := true
+          TW_INCLUDE_NTFS_3G := true
+          TW_EXTRA_LANGUAGES := true
+          TW_DEFAULT_LANGUAGE := zh_CN
+          TW_BRIGHTNESS_PATH := /sys/class/leds/lcd-backlight/brightness
+          TW_MAX_BRIGHTNESS := 255
+          TW_DEFAULT_BRIGHTNESS := 128
+          TW_NO_SCREEN_BLANK := true
+          TW_INCLUDE_REPACKTOOLS := true
+          TW_INCLUDE_LIBRESETPROP := true
+          TW_INCLUDE_LPTOOLS := true
           
           # recovery-as-boot
           BOARD_USES_RECOVERY_AS_BOOT := true
           EOF
-          
-          if [ "${{ github.event.inputs.is_ab_device }}" = "true" ]; then
-            cat >> $DEVICE_PATH/BoardConfig.mk << EOF
+            
+            if [ "${{ github.event.inputs.is_ab_device }}" = "true" ]; then
+              cat >> "$DEVICE_PATH/BoardConfig.mk" << EOF
           AB_OTA_UPDATER := true
           AB_OTA_PARTITIONS += boot
           EOF
-          fi
-          
-          # 复制 kernel
-          mkdir -p $DEVICE_PATH/prebuilt
-          if [ -f "boot_out/kernel" ]; then
-            cp boot_out/kernel $DEVICE_PATH/prebuilt/kernel
-          fi
-          
-          # 创建 Android.mk
-          cat > $DEVICE_PATH/Android.mk << EOF
+            fi
+            
+            # 复制 kernel
+            if [ -f "workspace/boot_out/kernel" ]; then
+              cp workspace/boot_out/kernel "$DEVICE_PATH/prebuilt/kernel"
+              echo "Copied kernel"
+            fi
+            
+            # 创建 Android.mk
+            cat > "$DEVICE_PATH/Android.mk" << EOF
           LOCAL_PATH := \$(call my-dir)
           
           ifeq (\$(TARGET_DEVICE),${{ github.event.inputs.device_name }})
           include \$(call all-subdir-makefiles,\$(LOCAL_PATH))
           endif
           EOF
-          
-          # 创建 AndroidProducts.mk
-          cat > $DEVICE_PATH/AndroidProducts.mk << EOF
+            
+            # 创建 AndroidProducts.mk
+            cat > "$DEVICE_PATH/AndroidProducts.mk" << EOF
           PRODUCT_MAKEFILES := \\
               \$(LOCAL_DIR)/twrp_${{ github.event.inputs.device_name }}.mk
           EOF
-          
-          # 创建 device.mk
-          cat > $DEVICE_PATH/device.mk << EOF
+            
+            # 创建 device.mk
+            cat > "$DEVICE_PATH/device.mk" << EOF
           LOCAL_PATH := device/${{ github.event.inputs.manufacturer }}/${{ github.event.inputs.device_name }}
-          EOF
           
-          # 创建 twrp_*.mk
-          cat > $DEVICE_PATH/twrp_${{ github.event.inputs.device_name }}.mk << EOF
+          ifeq (\$(TARGET_PREBUILT_KERNEL),)
+          TARGET_PREBUILT_KERNEL := \$(LOCAL_PATH)/prebuilt/kernel
+          endif
+          EOF
+            
+            # 创建 twrp_*.mk
+            cat > "$DEVICE_PATH/twrp_${{ github.event.inputs.device_name }}.mk" << EOF
           \$(call inherit-product, \$(SRC_TARGET_DIR)/product/core_minimal.mk)
           
           # Inherit from device
@@ -270,9 +271,9 @@ jobs:
           PRODUCT_MODEL := ${{ github.event.inputs.device_name }}
           PRODUCT_MANUFACTURER := ${{ github.event.inputs.manufacturer }}
           EOF
-          
-          # 创建 recovery.fstab
-          cat > $DEVICE_PATH/recovery.fstab << EOF
+            
+            # 创建 recovery.fstab
+            cat > "$DEVICE_PATH/recovery.fstab" << EOF
           # mount point    fstype    device                                  flags
           /boot            emmc      /dev/block/bootdevice/by-name/boot      flags=backup=1;flashimg=1
           /data            ext4      /dev/block/bootdevice/by-name/userdata    flags=backup=1;wipeingui;canbewiped
@@ -280,7 +281,21 @@ jobs:
           /vendor          ext4      /dev/block/bootdevice/by-name/vendor      flags=backup=1;wipeingui
           /cache           ext4      /dev/block/bootdevice/by-name/cache       flags=backup=1;wipeingui
           /sdcard          vfat      /dev/block/mmcblk1p1                      flags=backup=1;removable
+          /recovery        emmc      /dev/block/bootdevice/by-name/recovery    flags=backup=1
           EOF
+            
+            # 创建 system.prop
+            cat > "$DEVICE_PATH/system.prop" << EOF
+          # Device specific properties
+          ro.product.first_api_level=${{ github.event.inputs.api_level }}
+          EOF
+            
+            echo "=== Manual device tree created ==="
+            ls -la "$DEVICE_PATH"
+          else
+            echo "=== twrpdtgen succeeded, keeping its output ==="
+            ls -la "$DEVICE_PATH"
+          fi
 
       - name: Add recovery-as-boot configuration
         run: |
@@ -288,21 +303,30 @@ jobs:
           BOARDCONFIG="$DEVICE_PATH/BoardConfig.mk"
           
           if [ -f "$BOARDCONFIG" ]; then
-            cp "$BOARDCONFIG" "${BOARDCONFIG}.bak"
-            
-            cat >> "$BOARDCONFIG" << EOF
-            
+            # 检查是否已有 recovery-as-boot 配置
+            if ! grep -q "BOARD_USES_RECOVERY_AS_BOOT" "$BOARDCONFIG"; then
+              cat >> "$BOARDCONFIG" << EOF
+          
           # === recovery-as-boot Configuration ===
           BOARD_USES_RECOVERY_AS_BOOT := true
           EOF
+            fi
             
-            if [ "${{ github.event.inputs.is_ab_device }}" = "true" ]; then
+            if [ "${{ github.event.inputs.is_ab_device }}" = "true" ] && ! grep -q "AB_OTA_UPDATER" "$BOARDCONFIG"; then
               cat >> "$BOARDCONFIG" << EOF
           AB_OTA_UPDATER := true
           AB_OTA_PARTITIONS += boot
           EOF
             fi
           fi
+
+      - name: Debug output structure
+        run: |
+          echo "=== Full output structure ==="
+          find output -type f | sort
+          echo ""
+          echo "=== output directory size ==="
+          du -sh output/
 
       - name: Create adaptation guide
         run: |
@@ -336,8 +360,9 @@ jobs:
       - name: Package and upload
         run: |
           cd output
-          zip -r ../${{ github.event.inputs.manufacturer }}_${{ github.event.inputs.device_name }}_recovery_as_boot.zip . || true
+          zip -r ../${{ github.event.inputs.manufacturer }}_${{ github.event.inputs.device_name }}_recovery_as_boot.zip .
           cd ..
+          ls -lh *.zip
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
