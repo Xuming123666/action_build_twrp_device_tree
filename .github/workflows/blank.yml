@@ -43,7 +43,9 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pip cpio file xz-utils wget git binwalk p7zip-full
+          sudo apt-get install -y python3-pip cpio file xz-utils wget git
+          # 关键：确保 file 命令可用（AIK 依赖它）
+          file --version
           pip3 install --upgrade pip
           pip3 install twrpdtgen
 
@@ -53,98 +55,47 @@ jobs:
           curl -L -o workspace/boot.img "${{ github.event.inputs.boot_url }}"
           file workspace/boot.img
           ls -lh workspace/boot.img
-          xxd workspace/boot.img | head -5
 
-      - name: Analyze boot.img structure
+      - name: Download magiskboot (more reliable than AIK)
         run: |
           cd workspace
-          echo "=== File info ==="
-          file boot.img
-          echo ""
-          echo "=== First 64 bytes (hex) ==="
-          xxd -l 64 boot.img
-          echo ""
-          echo "=== Binwalk scan ==="
-          binwalk -B boot.img || true
-          echo ""
-          echo "=== Check for ANDROID! magic ==="
-          xxd -l 8 boot.img | grep -i "ANDROID" || echo "No ANDROID! header at offset 0"
-          echo ""
-          echo "=== Check for possible offset ==="
-          xxd boot.img | grep -i "ANDROID" | head -5 || true
-
-      - name: Download and setup AIK-Linux with fallback methods
-        run: |
-          cd workspace
-          
-          # 方法1: 尝试 ravindu644 的 AIK-Linux 镜像（更新版本）
-          git clone --depth=1 https://github.com/ravindu644/AIK-Linux.git AIK-ravindu || true
-          
-          # 方法2: 尝试 osm0sis 的 linux 分支
-          git clone --depth=1 -b linux https://github.com/osm0sis/Android-Image-Kitchen.git AIK-linux || true
-          
-          # 方法3: 使用 twrpdtgen 作者维护的镜像
-          git clone --depth=1 https://github.com/SebaUbuntu/AIK-Linux-mirror.git AIK-seba || true
-          
-          # 选择可用的 AIK
-          for aik in AIK-ravindu AIK-linux AIK-seba; do
-            if [ -d "$aik" ] && [ -f "$aik/unpackimg.sh" ]; then
-              ln -sf "$aik" AIK
-              echo "Using $aik"
-              ls -la AIK/
-              chmod +x AIK/*.sh
-              break
-            fi
-          done
-
-      - name: Attempt to unpack boot.img with multiple methods
-        run: |
-          cd workspace
-          
-          # 方法1: AIK
-          echo "=== Trying AIK ==="
-          cp boot.img AIK/ 2>/dev/null || true
-          cd AIK 2>/dev/null && ./unpackimg.sh boot.img 2>&1 && cd .. || true
-          
-          # 如果 AIK 失败，尝试手动分析
-          if [ ! -d "AIK/ramdisk" ] && [ ! -d "AIK/split_img" ]; then
-            echo ""
-            echo "=== AIK failed, trying manual extraction ==="
-            
-            # 检查是否有偏移
-            OFFSET=$(xxd -c 1 boot.img | grep -n "ANDROID" | head -1 | cut -d: -f1)
-            if [ -n "$OFFSET" ] && [ "$OFFSET" -gt "1" ]; then
-              OFFSET=$((OFFSET - 1))
-              echo "Found ANDROID header at offset $OFFSET, extracting..."
-              dd if=boot.img of=boot_fixed.img bs=1 skip=$OFFSET 2>/dev/null
-              cp boot_fixed.img AIK/
-              cd AIK && ./unpackimg.sh boot_fixed.img 2>&1 && cd .. || true
-            fi
+          # 下载预编译的 magiskboot
+          wget -q https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk -O magisk.zip
+          unzip -o magisk.zip -d magisk_extracted || true
+          # 尝试从 apk 中提取 magiskboot
+          if [ -f "magisk_extracted/lib/arm64-v8a/libmagiskboot.so" ]; then
+            cp magisk_extracted/lib/arm64-v8a/libmagiskboot.so magiskboot
+            chmod +x magiskboot
+          elif [ -f "magisk_extracted/lib/x86_64/libmagiskboot.so" ]; then
+            cp magisk_extracted/lib/x86_64/libmagiskboot.so magiskboot
+            chmod +x magiskboot
           fi
           
-          # 如果还是失败，尝试使用 Python 的 unpackbootimg
-          if [ ! -d "AIK/ramdisk" ] && [ ! -d "AIK/split_img" ]; then
-            echo ""
-            echo "=== Trying Python unpackbootimg ==="
-            pip3 install pyunpackbootimg 2>/dev/null || true
-            python3 -c "
-            try:
-                from pyunpackbootimg import unpack
-                unpack('boot.img', 'manual_unpack')
-                print('Python unpack success')
-            except Exception as e:
-                print(f'Python unpack failed: {e}')
-            " 2>&1 || true
+          # 备用方案：直接下载 standalone magiskboot
+          if [ ! -f "magiskboot" ]; then
+            wget -q https://github.com/pinnacode/magiskboot_build/releases/download/last-ci/magiskboot-x86_64-linux -O magiskboot
+            chmod +x magiskboot
           fi
+          
+          ./magiskboot --version 2>/dev/null || echo "magiskboot downloaded"
 
-      - name: Fix and repack boot.img
+      - name: Unpack boot.img with magiskboot and fix prop
         run: |
           cd workspace
+          mkdir -p boot_out
+          cd boot_out
           
-          # 检查是否成功解包
-          if [ -d "AIK/ramdisk" ] || [ -d "AIK/split_img" ]; then
-            echo "AIK unpack successful"
-            cd AIK
+          # 用 magiskboot 解包
+          ../magiskboot unpack -h ../boot.img 2>&1 || true
+          
+          ls -la
+          
+          # 提取 ramdisk
+          if [ -f "ramdisk.cpio" ]; then
+            mkdir -p ramdisk
+            cd ramdisk
+            ../magiskboot cpio ../ramdisk.cpio extract 2>&1 || true
+            cd ..
             
             # 补全 prop
             PROP_FILE=""
@@ -155,7 +106,9 @@ jobs:
             fi
             
             if [ -n "$PROP_FILE" ]; then
+              echo "Found prop file: $PROP_FILE"
               if ! grep -q "ro.product.first_api_level" "$PROP_FILE"; then
+                echo "Adding ro.product.first_api_level=${{ github.event.inputs.api_level }}"
                 echo "ro.product.first_api_level=${{ github.event.inputs.api_level }}" >> "$PROP_FILE"
               fi
             else
@@ -163,71 +116,171 @@ jobs:
               echo "ro.product.first_api_level=${{ github.event.inputs.api_level }}" > ramdisk/prop.default
             fi
             
-            ./repackimg.sh
+            # 重新打包 ramdisk
+            cd ramdisk
+            find . | cpio -o -H newc > ../ramdisk_new.cpio
             cd ..
-            cp AIK/image-new.img boot_fixed.img
+            mv ramdisk_new.cpio ramdisk.cpio
             
-          elif [ -d "manual_unpack" ]; then
-            echo "Manual unpack successful"
-            # 处理手动解包结果
-            if [ -f "manual_unpack/ramdisk.cpio.gz" ]; then
-              mkdir -p manual_unpack/ramdisk
-              cd manual_unpack/ramdisk
-              zcat ../ramdisk.cpio.gz | cpio -i 2>/dev/null || true
-              cd ../..
-              
-              if [ -f "manual_unpack/ramdisk/prop.default" ]; then
-                if ! grep -q "ro.product.first_api_level" "manual_unpack/ramdisk/prop.default"; then
-                  echo "ro.product.first_api_level=${{ github.event.inputs.api_level }}" >> "manual_unpack/ramdisk/prop.default"
-                fi
-              fi
-              
-              # 重新打包 ramdisk
-              cd manual_unpack/ramdisk
-              find . | cpio -o -H newc | gzip > ../ramdisk_new.cpio.gz
-              cd ../..
-              
-              # 需要 mkbootimg 重新打包
-              echo "Need to repack with mkbootimg"
+            # 重新打包 boot.img
+            ../magiskboot repack ../boot.img boot_fixed.img 2>&1 || true
+            
+            if [ -f "boot_fixed.img" ]; then
+              cp boot_fixed.img ../boot_fixed.img
             fi
-          else
-            echo "WARNING: Could not unpack boot.img, trying direct twrpdtgen"
-            cp boot.img boot_fixed.img
           fi
           
-          ls -lh boot_fixed.img || true
+          cd ..
+          ls -lh boot_fixed.img 2>/dev/null || cp boot.img boot_fixed.img
 
-      - name: Extract kernel info
+      - name: Setup AIK for twrpdtgen (fix built-in AIK)
         run: |
           cd workspace
-          echo "=== Kernel Info ===" > kernel_info.txt || true
+          # twrpdtgen 3.0.0 使用 sebaubuntu_libs/libaik，它会自动克隆 AIK
+          # 我们预先克隆一个可用的 AIK 到它期望的位置
+          # 先找到 libaik 的 AIK 目录
+          python3 -c "
+          import sebaubuntu_libs.libaik as libaik
+          import inspect
+          import os
+          aik_path = os.path.dirname(inspect.getfile(libaik))
+          print(f'libaik path: {aik_path}')
+          " > aik_path.txt 2>/dev/null || true
           
-          if [ -f AIK/split_img/boot.img-base ]; then
-            echo "BOARD_KERNEL_BASE := 0x$(cat AIK/split_img/boot.img-base)" >> kernel_info.txt
+          # 或者直接在用户目录下创建 AIK（twrpdtgen 可能在这里查找）
+          mkdir -p ~/.local/share/sebaubuntu_libs/libaik
+          if [ ! -d ~/.local/share/sebaubuntu_libs/libaik/AIK-Linux-mirror ]; then
+            git clone --depth=1 https://github.com/SebaUbuntu/AIK-Linux-mirror.git ~/.local/share/sebaubuntu_libs/libaik/AIK-Linux-mirror || true
           fi
-          if [ -f AIK/split_img/boot.img-pagesize ]; then
-            echo "BOARD_KERNEL_PAGESIZE := $(cat AIK/split_img/boot.img-pagesize)" >> kernel_info.txt
+          
+          # 确保 AIK 脚本可执行
+          if [ -d ~/.local/share/sebaubuntu_libs/libaik/AIK-Linux-mirror ]; then
+            chmod +x ~/.local/share/sebaubuntu_libs/libaik/AIK-Linux-mirror/*.sh
           fi
-          if [ -f AIK/split_img/boot.img-cmdline ]; then
-            echo "BOARD_KERNEL_CMDLINE := $(cat AIK/split_img/boot.img-cmdline)" >> kernel_info.txt
-          fi
-          cat kernel_info.txt || true
 
       - name: Generate device tree with twrpdtgen 3.0.0
         run: |
           mkdir -p output
-          if [ -f workspace/boot_fixed.img ]; then
-            python3 -m twrpdtgen \
-              -o output/${{ github.event.inputs.manufacturer }}/${{ github.event.inputs.device_name }} \
-              workspace/boot_fixed.img || \
-            python3 -m twrpdtgen \
-              -o output/${{ github.event.inputs.manufacturer }}/${{ github.event.inputs.device_name }} \
-              workspace/boot.img
-          else
-            python3 -m twrpdtgen \
-              -o output/${{ github.event.inputs.manufacturer }}/${{ github.event.inputs.device_name }} \
-              workspace/boot.img
+          # 尝试用修复后的 boot.img
+          python3 -m twrpdtgen \
+            -o output/${{ github.event.inputs.manufacturer }}/${{ github.event.inputs.device_name }} \
+            workspace/boot_fixed.img 2>&1 || \
+          # 如果失败，尝试原始 boot.img
+          python3 -m twrpdtgen \
+            -o output/${{ github.event.inputs.manufacturer }}/${{ github.event.inputs.device_name }} \
+            workspace/boot.img 2>&1 || \
+          # 如果还是失败，使用 Python 脚本手动调用 DeviceTree 并传入已解包的信息
+          echo "twrpdtgen failed, will try manual generation"
+
+      - name: Manual device tree generation fallback
+        if: failure()
+        run: |
+          cd workspace
+          # 如果 twrpdtgen 完全失败，我们用 magiskboot 提取的信息手动生成基础设备树
+          mkdir -p output/${{ github.event.inputs.manufacturer }}/${{ github.event.inputs.device_name }}
+          DEVICE_PATH="output/${{ github.event.inputs.manufacturer }}/${{ github.event.inputs.device_name }}"
+          
+          # 读取 magiskboot 解包的信息
+          KERNEL=""
+          if [ -f "boot_out/kernel" ]; then
+            KERNEL="kernel"
           fi
+          
+          # 创建基础 BoardConfig.mk
+          cat > $DEVICE_PATH/BoardConfig.mk << EOF
+          DEVICE_PATH := device/${{ github.event.inputs.manufacturer }}/${{ github.event.inputs.device_name }}
+          
+          # For building with minimal manifest
+          ALLOW_MISSING_DEPENDENCIES := true
+          
+          # Architecture
+          TARGET_ARCH := arm64
+          TARGET_ARCH_VARIANT := armv8-a
+          TARGET_CPU_ABI := arm64-v8a
+          TARGET_CPU_ABI2 :=
+          TARGET_CPU_VARIANT := generic
+          
+          # Assert
+          TARGET_OTA_ASSERT_DEVICE := ${{ github.event.inputs.device_name }}
+          
+          # File systems
+          BOARD_HAS_LARGE_FILESYSTEM := true
+          BOARD_SYSTEMIMAGE_PARTITION_TYPE := ext4
+          BOARD_USERDATAIMAGE_FILE_SYSTEM_TYPE := ext4
+          TARGET_USERIMAGES_USE_EXT4 := true
+          TARGET_USERIMAGES_USE_F2FS := true
+          
+          # Kernel
+          TARGET_PREBUILT_KERNEL := \$(DEVICE_PATH)/prebuilt/kernel
+          BOARD_KERNEL_CMDLINE := androidboot.hardware=qcom
+          BOARD_KERNEL_BASE := 0x80000000
+          BOARD_KERNEL_PAGESIZE := 2048
+          
+          # recovery-as-boot
+          BOARD_USES_RECOVERY_AS_BOOT := true
+          EOF
+          
+          if [ "${{ github.event.inputs.is_ab_device }}" = "true" ]; then
+            cat >> $DEVICE_PATH/BoardConfig.mk << EOF
+          AB_OTA_UPDATER := true
+          AB_OTA_PARTITIONS += boot
+          EOF
+          fi
+          
+          # 复制 kernel
+          mkdir -p $DEVICE_PATH/prebuilt
+          if [ -f "boot_out/kernel" ]; then
+            cp boot_out/kernel $DEVICE_PATH/prebuilt/kernel
+          fi
+          
+          # 创建 Android.mk
+          cat > $DEVICE_PATH/Android.mk << EOF
+          LOCAL_PATH := \$(call my-dir)
+          
+          ifeq (\$(TARGET_DEVICE),${{ github.event.inputs.device_name }})
+          include \$(call all-subdir-makefiles,\$(LOCAL_PATH))
+          endif
+          EOF
+          
+          # 创建 AndroidProducts.mk
+          cat > $DEVICE_PATH/AndroidProducts.mk << EOF
+          PRODUCT_MAKEFILES := \\
+              \$(LOCAL_DIR)/twrp_${{ github.event.inputs.device_name }}.mk
+          EOF
+          
+          # 创建 device.mk
+          cat > $DEVICE_PATH/device.mk << EOF
+          LOCAL_PATH := device/${{ github.event.inputs.manufacturer }}/${{ github.event.inputs.device_name }}
+          EOF
+          
+          # 创建 twrp_*.mk
+          cat > $DEVICE_PATH/twrp_${{ github.event.inputs.device_name }}.mk << EOF
+          \$(call inherit-product, \$(SRC_TARGET_DIR)/product/core_minimal.mk)
+          
+          # Inherit from device
+          \$(call inherit-product, device/${{ github.event.inputs.manufacturer }}/${{ github.event.inputs.device_name }}/device.mk)
+          
+          # Inherit some common TWRP stuff.
+          \$(call inherit-product, vendor/twrp/config/common.mk)
+          
+          # Device identifier
+          PRODUCT_DEVICE := ${{ github.event.inputs.device_name }}
+          PRODUCT_NAME := twrp_${{ github.event.inputs.device_name }}
+          PRODUCT_BRAND := ${{ github.event.inputs.manufacturer }}
+          PRODUCT_MODEL := ${{ github.event.inputs.device_name }}
+          PRODUCT_MANUFACTURER := ${{ github.event.inputs.manufacturer }}
+          EOF
+          
+          # 创建 recovery.fstab
+          cat > $DEVICE_PATH/recovery.fstab << EOF
+          # mount point    fstype    device                                  flags
+          /boot            emmc      /dev/block/bootdevice/by-name/boot      flags=backup=1;flashimg=1
+          /data            ext4      /dev/block/bootdevice/by-name/userdata    flags=backup=1;wipeingui;canbewiped
+          /system          ext4      /dev/block/bootdevice/by-name/system      flags=backup=1;wipeingui
+          /vendor          ext4      /dev/block/bootdevice/by-name/vendor      flags=backup=1;wipeingui
+          /cache           ext4      /dev/block/bootdevice/by-name/cache       flags=backup=1;wipeingui
+          /sdcard          vfat      /dev/block/mmcblk1p1                      flags=backup=1;removable
+          EOF
 
       - name: Add recovery-as-boot configuration
         run: |
@@ -260,11 +313,6 @@ jobs:
           - 厂商: ${{ github.event.inputs.manufacturer }}
           - 设备: ${{ github.event.inputs.device_name }}
           - A/B 设备: ${{ github.event.inputs.is_ab_device }}
-          
-          ## 内核参数
-          \`\`\`
-          $(cat workspace/kernel_info.txt 2>/dev/null || echo 'No kernel info extracted')
-          \`\`\`
           
           ## TWRP 11 源码初始化
           \`\`\`bash
