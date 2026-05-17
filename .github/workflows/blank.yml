@@ -15,6 +15,11 @@ on:
         description: '厂商名称（如 Readboy）'
         required: true
         type: string
+      api_level:
+        description: 'Android API Level（Android 10 填 29）'
+        required: false
+        default: '29'
+        type: string
 
 permissions:
   contents: write
@@ -30,7 +35,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pip cpio file git
+          sudo apt-get install -y python3-pip cpio file git xz-utils
           pip3 install --upgrade pip
           pip3 install twrpdtgen
 
@@ -39,14 +44,60 @@ jobs:
           mkdir -p workspace
           curl -L -o workspace/boot.img "${{ github.event.inputs.boot_url }}"
           file workspace/boot.img
+          ls -lh workspace/boot.img
+
+      - name: Download and setup Android Image Kitchen
+        run: |
+          cd workspace
+          git clone --depth=1 https://github.com/osm0sis/Android-Image-Kitchen.git AIK
+          chmod +x AIK/unpackimg.sh AIK/repackimg.sh
+
+      - name: Fix boot.img for twrpdtgen
+        run: |
+          cd workspace
+          
+          # 用 AIK 解包 boot.img
+          cp boot.img AIK/
+          cd AIK
+          ./unpackimg.sh boot.img
+          
+          # 检查并补全 ro.product.first_api_level
+          # 这个属性对 twrpdtgen 至关重要
+          PROP_FILE=""
+          if [ -f "ramdisk/prop.default" ]; then
+            PROP_FILE="ramdisk/prop.default"
+          elif [ -f "ramdisk/default.prop" ]; then
+            PROP_FILE="ramdisk/default.prop"
+          fi
+          
+          if [ -n "$PROP_FILE" ]; then
+            echo "Found prop file: $PROP_FILE"
+            if ! grep -q "ro.product.first_api_level" "$PROP_FILE"; then
+              echo "Adding ro.product.first_api_level=${{ github.event.inputs.api_level }}"
+              echo "ro.product.first_api_level=${{ github.event.inputs.api_level }}" >> "$PROP_FILE"
+            else
+              echo "ro.product.first_api_level already exists"
+            fi
+          else
+            echo "No prop file found, creating one"
+            mkdir -p ramdisk
+            echo "ro.product.first_api_level=${{ github.event.inputs.api_level }}" > ramdisk/prop.default
+          fi
+          
+          # 重新打包
+          ./repackimg.sh
+          
+          # 复制修复后的 boot.img
+          cd ..
+          cp AIK/image-new.img boot_fixed.img
+          ls -lh boot_fixed.img
 
       - name: Generate device tree with twrpdtgen 3.0.0
         run: |
           mkdir -p output
-          # twrpdtgen 3.0.0 只支持 -o 参数，其他旧参数已移除
           python3 -m twrpdtgen \
             -o output/${{ github.event.inputs.manufacturer }}/${{ github.event.inputs.device_name }} \
-            workspace/boot.img
+            workspace/boot_fixed.img
         continue-on-error: false
 
       - name: Package device tree
@@ -67,6 +118,7 @@ jobs:
             - 厂商: ${{ github.event.inputs.manufacturer }}
             - 设备: ${{ github.event.inputs.device_name }}
             - 来源: ${{ github.event.inputs.boot_url }}
+            - Android API Level: ${{ github.event.inputs.api_level }}
             - 生成时间: ${{ github.event.head_commit.timestamp || github.event.repository.updated_at }}
           files: |
             ${{ github.event.inputs.manufacturer }}_${{ github.event.inputs.device_name }}_twrp_dt.zip
